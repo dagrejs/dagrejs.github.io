@@ -769,9 +769,34 @@ var dagre = (() => {
     }, {});
   }
   var GRAPH_NODE = "\0";
+  function compareByOldOrder(oldNodes, nodeA, nodeB) {
+    var _a, _b, _c, _d, _e, _f;
+    if (!(oldNodes && nodeA && nodeB && nodeA.dummy === "edge" && nodeB.dummy === "edge" && nodeA.edgeObj && nodeB.edgeObj && oldNodes[nodeA.edgeObj.v] && oldNodes[nodeB.edgeObj.v] && oldNodes[nodeA.edgeObj.w] && oldNodes[nodeB.edgeObj.w])) {
+      return 0;
+    }
+    let isForward = true;
+    if (nodeA.edgeObj.w === nodeB.edgeObj.w) {
+      isForward = false;
+    }
+    const targetRank = isForward ? (_b = (_a = oldNodes[nodeA.edgeObj.v]) == null ? void 0 : _a.rank) != null ? _b : NaN + 1 : (_d = (_c = oldNodes[nodeA.edgeObj.w]) == null ? void 0 : _c.rank) != null ? _d : NaN - 1;
+    const oldA = Object.entries(oldNodes).find((n) => {
+      var _a2, _b2;
+      return ((_a2 = n[1].edgeObj) == null ? void 0 : _a2.v) === nodeA.edgeObj.v && ((_b2 = n[1].edgeObj) == null ? void 0 : _b2.w) === nodeA.edgeObj.w && n[1].rank === targetRank;
+    });
+    const oldB = Object.entries(oldNodes).find((n) => {
+      var _a2, _b2;
+      return ((_a2 = n[1].edgeObj) == null ? void 0 : _a2.v) === nodeB.edgeObj.v && ((_b2 = n[1].edgeObj) == null ? void 0 : _b2.w) === nodeB.edgeObj.w && n[1].rank === targetRank;
+    });
+    if (!oldA || !oldB) {
+      return 0;
+    }
+    const oldOrderA = (_e = oldA[1].order) != null ? _e : NaN;
+    const oldOrderB = (_f = oldB[1].order) != null ? _f : NaN;
+    return isNaN(oldOrderA - oldOrderB) ? 0 : oldOrderA - oldOrderB;
+  }
 
   // lib/version.ts
-  var version = "3.0.0";
+  var version = "3.1.0";
 
   // lib/data/list.ts
   var List = class {
@@ -925,8 +950,8 @@ var dagre = (() => {
   }
 
   // lib/acyclic.ts
-  function run(graph) {
-    const fas = graph.graph().acyclicer === "greedy" ? greedyFAS(graph, weightFn(graph)) : dfsFAS(graph);
+  function run(graph, oldGraph) {
+    const fas = graph.graph().acyclicer === "greedy" ? greedyFAS(graph, weightFn(graph)) : dfsFAS(graph, oldGraph != null ? oldGraph : null);
     fas.forEach((e) => {
       const label = graph.edge(e);
       graph.removeEdge(e);
@@ -940,7 +965,7 @@ var dagre = (() => {
       };
     }
   }
-  function dfsFAS(graph) {
+  function dfsFAS(graph, oldGraph) {
     const fas = [];
     const stack = {};
     const visited = {};
@@ -959,7 +984,29 @@ var dagre = (() => {
       });
       delete stack[v2];
     }
-    graph.nodes().forEach(dfs2);
+    function dfsDynamic(v2) {
+      var _a;
+      if (Object.hasOwn(visited, v2)) {
+        return;
+      }
+      visited[v2] = true;
+      stack[v2] = true;
+      (_a = graph.outEdges(v2)) == null ? void 0 : _a.forEach((e) => {
+        var _a2, _b;
+        if (Object.hasOwn(stack, e.w) || ((_a2 = oldGraph.node(v2)) == null ? void 0 : _a2.rank) > ((_b = oldGraph.node(e.w)) == null ? void 0 : _b.rank) && isReachedFromStartWithoutEdge(graph, e.w, e)) {
+          fas.push(e);
+        } else {
+          dfsDynamic(e.w);
+        }
+      });
+      delete stack[v2];
+    }
+    let dfsFn = dfs2;
+    if (oldGraph && typeof oldGraph.node === "function") {
+      dfsFn = dfsDynamic;
+    }
+    graph.sources().forEach(dfsFn);
+    graph.nodes().forEach(dfsFn);
     return fas;
   }
   function undo(graph) {
@@ -973,6 +1020,25 @@ var dagre = (() => {
         graph.setEdge(e.w, e.v, label, forwardName);
       }
     });
+  }
+  function isReachedFromStartWithoutEdge(graph, node, ignoreEdge) {
+    const localVisited = /* @__PURE__ */ new Set();
+    function reverseDfs(v2) {
+      var _a;
+      if (graph.sources().includes(v2)) {
+        return true;
+      }
+      localVisited.add(v2);
+      for (const e of (_a = graph.inEdges(v2)) != null ? _a : []) {
+        if (!(e.v === ignoreEdge.v && e.w === ignoreEdge.w) && !localVisited.has(e.v)) {
+          if (reverseDfs(e.v)) {
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+    return reverseDfs(node);
   }
 
   // lib/normalize.ts
@@ -1316,7 +1382,10 @@ var dagre = (() => {
   var parent_dummy_chains_default = parentDummyChains;
   function parentDummyChains(graph) {
     const postorderNums = postorder2(graph);
-    graph.graph().dummyChains.forEach((v2) => {
+    const graphData = graph.graph();
+    if (!Array.isArray(graphData.dummyChains)) return;
+    const dummyChains = graphData.dummyChains;
+    dummyChains.forEach((v2) => {
       let node = graph.node(v2);
       const edgeObj = node.edgeObj;
       const pathData = findPath(graph, postorderNums, edgeObj.v, edgeObj.w);
@@ -1388,7 +1457,9 @@ var dagre = (() => {
     graph.graph().nestingRoot = root;
     graph.edges().forEach((e) => graph.edge(e).minlen *= nodeSep);
     const weight = sumWeights(graph) + 1;
-    graph.children(GRAPH_NODE).forEach((child) => dfs(graph, root, nodeSep, weight, height, depths, child));
+    graph.children(GRAPH_NODE).forEach((child) => {
+      dfs(graph, root, nodeSep, weight, height, depths, child);
+    });
     graph.graph().nodeRankFactor = nodeSep;
   }
   function dfs(graph, root, nodeSep, weight, height, depths, v2) {
@@ -1466,7 +1537,7 @@ var dagre = (() => {
       if (children.length) {
         children.forEach(dfs2);
       }
-      if (Object.hasOwn(node, "minRank")) {
+      if (node && Object.hasOwn(node, "minRank")) {
         node.borderLeft = [];
         node.borderRight = [];
         for (let rank2 = node.minRank, maxRank2 = node.maxRank + 1; rank2 < maxRank2; ++rank2) {
@@ -1548,7 +1619,7 @@ var dagre = (() => {
   }
 
   // lib/order/init-order.ts
-  function initOrder(graph) {
+  function initOrder(graph, oldNodes = null) {
     const visited = {};
     const simpleNodes = graph.nodes().filter((v2) => !graph.children(v2).length);
     const simpleNodesRanks = simpleNodes.map((v2) => graph.node(v2).rank);
@@ -1561,11 +1632,17 @@ var dagre = (() => {
       layers[node.rank].push(v2);
       const successors = graph.successors(v2);
       if (successors) {
-        successors.forEach(dfs2);
+        const sortedSuccessors = [...successors].sort((a, b2) => compareOldOrder(a, b2));
+        sortedSuccessors.forEach(dfs2);
       }
     }
     const orderedVs = simpleNodes.sort((a, b2) => graph.node(a).rank - graph.node(b2).rank);
     orderedVs.forEach(dfs2);
+    function compareOldOrder(a, b2) {
+      const nodeA = graph.node(a);
+      const nodeB = graph.node(b2);
+      return compareByOldOrder(oldNodes, nodeA, nodeB);
+    }
     return layers;
   }
 
@@ -1709,7 +1786,19 @@ var dagre = (() => {
   }
 
   // lib/order/sort.ts
-  function sort(entries, biasRight) {
+  function sort(entries, reversedPairs, oldNodes, graph, biasRight) {
+    let resolvedReversedPairs = {};
+    let resolvedOldNodes = null;
+    let resolvedGraph = null;
+    let resolvedBiasRight = biasRight;
+    if (typeof reversedPairs === "boolean") {
+      resolvedBiasRight = reversedPairs;
+      resolvedReversedPairs = {};
+    } else if (reversedPairs) {
+      resolvedReversedPairs = reversedPairs;
+      resolvedOldNodes = oldNodes != null ? oldNodes : null;
+      resolvedGraph = graph != null ? graph : null;
+    }
     const parts = partition(entries, (entry) => {
       return Object.hasOwn(entry, "barycenter");
     });
@@ -1719,7 +1808,11 @@ var dagre = (() => {
     let sum = 0;
     let weight = 0;
     let vsIndex = 0;
-    sortable.sort(compareWithBias(!!biasRight));
+    sortable.sort(compareWithOldOrder(resolvedGraph, resolvedOldNodes, !!resolvedBiasRight));
+    for (const [key, value] of Object.entries(resolvedReversedPairs)) {
+      const keyIndex = sortable.findIndex((entry) => entry.vs[0] === key);
+      sortable.splice(keyIndex + 1, 0, value);
+    }
     vsIndex = consumeUnsortable(vs, unsortable, vsIndex);
     sortable.forEach((entry) => {
       vsIndex += entry.vs.length;
@@ -1744,19 +1837,36 @@ var dagre = (() => {
     }
     return index;
   }
-  function compareWithBias(bias) {
+  function compareWithOldOrder(graph, oldNodes, bias) {
     return (entryV, entryW) => {
       if (entryV.barycenter < entryW.barycenter) {
         return -1;
       } else if (entryV.barycenter > entryW.barycenter) {
         return 1;
       }
+      if (graph && (typeof entryV.vs[0] === "string" || typeof entryW.vs[0] === "string")) {
+        const nodeV = graph.node(entryV.vs[0]);
+        const nodeW = graph.node(entryW.vs[0]);
+        const byOldOrder = compareByOldOrder(oldNodes, nodeV, nodeW);
+        if (byOldOrder !== 0) {
+          return byOldOrder;
+        }
+      }
       return !bias ? entryV.i - entryW.i : entryW.i - entryV.i;
     };
   }
 
   // lib/order/sort-subgraph.ts
-  function sortSubgraph(graph, v2, constraintGraph, biasRight) {
+  function sortSubgraph(graph, v2, constraintGraph, oldNodes, biasRight) {
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i, _j, _k;
+    let resolvedOldNodes = null;
+    let resolvedBiasRight = biasRight;
+    if (typeof oldNodes === "boolean") {
+      resolvedBiasRight = oldNodes;
+      resolvedOldNodes = null;
+    } else if (oldNodes !== void 0) {
+      resolvedOldNodes = oldNodes;
+    }
     let movable = graph.children(v2);
     const node = graph.node(v2);
     const bl = node ? node.borderLeft : void 0;
@@ -1768,7 +1878,7 @@ var dagre = (() => {
     const barycenters = barycenter(graph, movable);
     barycenters.forEach((entry) => {
       if (graph.children(entry.v).length) {
-        const subgraphResult = sortSubgraph(graph, entry.v, constraintGraph, biasRight);
+        const { result: subgraphResult } = sortSubgraph(graph, entry.v, constraintGraph, resolvedOldNodes, resolvedBiasRight);
         subgraphs[entry.v] = subgraphResult;
         if (Object.hasOwn(subgraphResult, "barycenter")) {
           mergeBarycenters(entry, subgraphResult);
@@ -1777,7 +1887,36 @@ var dagre = (() => {
     });
     const entries = resolveConflicts(barycenters, constraintGraph);
     expandSubgraphs(entries, subgraphs);
-    const result = sort(entries, biasRight);
+    const reversedPairs = {};
+    let usedBias = false;
+    for (let i = 0; i < entries.length; i++) {
+      for (let j2 = i + 1; j2 < entries.length; j2++) {
+        if (!entries[i] || !entries[j2] || !((_a = entries[i]) == null ? void 0 : _a.barycenter) || !((_b = entries[j2]) == null ? void 0 : _b.barycenter)) {
+          continue;
+        }
+        if (((_c = entries[i]) == null ? void 0 : _c.barycenter) === entries[j2].barycenter) {
+          const nameI = (_e = (_d = entries[i]) == null ? void 0 : _d.vs[0]) != null ? _e : "";
+          const nameJ = (_g = (_f = entries[j2]) == null ? void 0 : _f.vs[0]) != null ? _g : "";
+          const nodeI = graph.node(nameI);
+          const nodeJ = graph.node(nameJ);
+          if (nodeI.dummy === "edge" && nodeJ.dummy === "edge" && ((_h = nodeI.edgeObj) == null ? void 0 : _h.v) === ((_i = nodeJ.edgeObj) == null ? void 0 : _i.v) && ((_j = nodeI.edgeObj) == null ? void 0 : _j.w) === ((_k = nodeJ.edgeObj) == null ? void 0 : _k.w)) {
+            if (nodeI.edgeLabel.reversed) {
+              reversedPairs[nameJ] = entries[i];
+              entries.splice(i, 1);
+              i--;
+              break;
+            } else {
+              reversedPairs[nameI] = entries[j2];
+              entries.splice(j2, 1);
+              j2--;
+            }
+          } else {
+            usedBias = true;
+          }
+        }
+      }
+    }
+    const result = sort(entries, reversedPairs, resolvedOldNodes, graph, resolvedBiasRight);
     if (bl && br) {
       result.vs = [bl, result.vs, br].flat(1);
       const blPredecessors = graph.predecessors(bl);
@@ -1793,6 +1932,8 @@ var dagre = (() => {
         result.weight += 2;
       }
     }
+    Object.defineProperty(result, "result", { value: result, enumerable: false, configurable: true, writable: true });
+    Object.defineProperty(result, "usedBias", { value: usedBias, enumerable: false, configurable: true, writable: true });
     return result;
   }
   function expandSubgraphs(entries, subgraphs) {
@@ -1880,7 +2021,7 @@ var dagre = (() => {
   }
 
   // lib/order/index.ts
-  function order(graph, opts = {}) {
+  function order(graph, opts = {}, oldNodes = null) {
     if (typeof opts.customOrder === "function") {
       opts.customOrder(graph, order);
       return;
@@ -1888,7 +2029,7 @@ var dagre = (() => {
     const maxRank2 = maxRank(graph);
     const downLayerGraphs = buildLayerGraphs(graph, range(1, maxRank2 + 1), "inEdges");
     const upLayerGraphs = buildLayerGraphs(graph, range(maxRank2 - 1, -1, -1), "outEdges");
-    let layering = initOrder(graph);
+    let layering = initOrder(graph, oldNodes);
     assignOrder(graph, layering);
     if (opts.disableOptimalOrderHeuristic) {
       return;
@@ -1897,7 +2038,7 @@ var dagre = (() => {
     let best;
     const constraints = opts.constraints || [];
     for (let i = 0, lastBest = 0; lastBest < 4; ++i, ++lastBest) {
-      sweepLayerGraphs(i % 2 ? downLayerGraphs : upLayerGraphs, i % 4 >= 2, constraints);
+      sweepLayerGraphs(i % 2 ? downLayerGraphs : upLayerGraphs, i % 4 >= 2, constraints, oldNodes);
       layering = buildLayerMatrix(graph);
       const cc = crossCount(graph, layering);
       if (cc < bestCC) {
@@ -1935,12 +2076,16 @@ var dagre = (() => {
       return buildLayerGraph(graph, rank2, relationship, nodesByRank.get(rank2) || []);
     });
   }
-  function sweepLayerGraphs(layerGraphs, biasRight, constraints) {
+  function sweepLayerGraphs(layerGraphs, switchBias, constraints, oldNodes) {
+    let biasRight = true;
     const cg = new p();
     layerGraphs.forEach(function(lg) {
       constraints.forEach((con) => cg.setEdge(con.left, con.right));
       const root = lg.graph().root;
-      const sorted = sortSubgraph(lg, root, cg, biasRight);
+      const { result: sorted, usedBias } = sortSubgraph(lg, root, cg, oldNodes, biasRight);
+      if (switchBias && usedBias) {
+        biasRight = !biasRight;
+      }
       sorted.vs.forEach((v2, i) => lg.node(v2).order = i);
       addSubgraphConstraints(lg, cg, sorted.vs);
     });
@@ -2057,7 +2202,7 @@ var dagre = (() => {
     const conflictsV = conflicts[v2];
     return conflictsV !== void 0 && Object.hasOwn(conflictsV, w2);
   }
-  function verticalAlignment(graph, layering, conflicts, neighborFn) {
+  function verticalAlignment(graph, layering, conflicts, neighborFn, corePath) {
     const root = {};
     const align = {};
     const pos = {};
@@ -2070,9 +2215,25 @@ var dagre = (() => {
     });
     layering.forEach((layer) => {
       let prevIdx = -1;
-      layer.forEach((v2) => {
-        const wsRaw = neighborFn(v2);
+      let alreadyAlignedIndex = -1;
+      let hasShifted = false;
+      let modifiedLayer = layer;
+      const coreNodeIndex = layer.findIndex((v2) => {
+        return (corePath == null ? void 0 : corePath.includes(v2)) || isInCorePath(v2, graph, corePath);
+      });
+      if (coreNodeIndex > 0) {
+        modifiedLayer = [layer[coreNodeIndex], ...layer.slice(0, coreNodeIndex), ...layer.slice(coreNodeIndex + 1)];
+        hasShifted = true;
+      }
+      modifiedLayer.forEach((v2) => {
+        var _a;
+        let wsRaw = neighborFn(v2);
         if (wsRaw && wsRaw.length) {
+          if (corePath == null ? void 0 : corePath.includes(v2)) {
+            wsRaw = wsRaw.filter((w2) => {
+              return isInCorePath(w2, graph, corePath);
+            });
+          }
           const ws = wsRaw.sort((a, b2) => {
             const posA = pos[a];
             const posB = pos[b2];
@@ -2083,12 +2244,17 @@ var dagre = (() => {
             const w2 = ws[i];
             if (w2 === void 0) continue;
             const posW = pos[w2];
-            if (posW !== void 0 && align[v2] === v2 && prevIdx < posW && !hasConflict(conflicts, v2, w2)) {
+            if (posW !== void 0 && align[v2] === v2 && prevIdx < posW && pos[w2] !== alreadyAlignedIndex && !hasConflict(conflicts, v2, w2)) {
               const rootW = root[w2];
               if (rootW !== void 0) {
                 align[w2] = v2;
                 align[v2] = root[v2] = rootW;
                 prevIdx = posW;
+                if (hasShifted) {
+                  prevIdx = -1;
+                  alreadyAlignedIndex = (_a = pos[w2]) != null ? _a : -1;
+                  hasShifted = false;
+                }
               }
             }
           }
@@ -2243,7 +2409,7 @@ var dagre = (() => {
       return (((_a = xs[1]) != null ? _a : 0) + ((_b = xs[2]) != null ? _b : 0)) / 2;
     });
   }
-  function positionX(graph) {
+  function positionX(graph, corePath) {
     const layering = buildLayerMatrix(graph);
     const conflicts = Object.assign(
       findType1Conflicts(graph, layering),
@@ -2263,7 +2429,7 @@ var dagre = (() => {
           const result = vert === "u" ? graph.predecessors(v2) : graph.successors(v2);
           return result || [];
         };
-        const align = verticalAlignment(graph, adjustedLayering, conflicts, neighborFn);
+        const align = verticalAlignment(graph, adjustedLayering, conflicts, neighborFn, corePath);
         let xs = horizontalCompaction(
           graph,
           adjustedLayering,
@@ -2324,12 +2490,21 @@ var dagre = (() => {
   function width(graph, v2) {
     return graph.node(v2).width;
   }
+  function isInCorePath(v2, graph, corePath) {
+    var _a;
+    if (!corePath) return false;
+    const edge = (_a = graph.node(v2)) == null ? void 0 : _a.edgeObj;
+    if (!edge || graph.node(v2).edgeLabel.reversed) return false;
+    const sourceIndex = corePath.indexOf(edge == null ? void 0 : edge.v);
+    const targetIndex = corePath.indexOf(edge == null ? void 0 : edge.w);
+    return sourceIndex !== -1 && targetIndex !== -1 && sourceIndex === (targetIndex + 1) % corePath.length || sourceIndex === (targetIndex - 1) % corePath.length;
+  }
 
   // lib/position/index.ts
-  function position(graph) {
+  function position(graph, corePath) {
     graph = asNonCompoundGraph(graph);
     positionY(graph);
-    Object.entries(positionX(graph)).forEach(([v2, x2]) => graph.node(v2).x = x2);
+    Object.entries(positionX(graph, corePath)).forEach(([v2, x2]) => graph.node(v2).x = x2);
   }
   function positionY(graph) {
     const layering = buildLayerMatrix(graph);
@@ -2362,19 +2537,233 @@ var dagre = (() => {
   }
 
   // lib/layout.ts
+  var _oldGraph = null;
+  var _rawOldNodes = null;
   function layout(g, opts = {}) {
-    const time2 = opts.debugTiming ? time : notime;
-    return time2("layout", () => {
-      const layoutGraph = time2("  buildLayoutGraph", () => buildLayoutGraph(g));
-      time2("  runLayout", () => runLayout(layoutGraph, time2, opts));
-      time2("  updateInputGraph", () => updateInputGraph(g, layoutGraph));
-      return layoutGraph;
+    recursiveClusterLayout(g, notime, opts);
+    return g;
+  }
+  function topLevelChildOf(g, node, cluster) {
+    let current = node;
+    while (current !== void 0) {
+      const parent = g.parent(current);
+      if (parent === cluster) return current;
+      current = parent;
+    }
+    return void 0;
+  }
+  function recursiveClusterLayout(g, time2, opts) {
+    const clusterNodes = g.nodes().filter((v2) => g.children(v2).length);
+    const clusterBounds = {};
+    clusterNodes.forEach((v2) => {
+      const node = g.node(v2);
+      if (node && node.rankdir) {
+        const subgraph = new p({ multigraph: true, compound: true });
+        subgraph.setGraph({ rankdir: node.rankdir });
+        const children = g.children(v2);
+        children.forEach((childId) => {
+          const childNode = { ...g.node(childId) };
+          subgraph.setNode(childId, childNode);
+          const parent = g.parent(childId);
+          if (parent && parent !== v2 && children.includes(parent)) {
+            subgraph.setParent(childId, parent);
+          }
+        });
+        const proxiedEdges = /* @__PURE__ */ new Set();
+        g.edges().forEach((e) => {
+          const srcChild = topLevelChildOf(g, e.v, v2);
+          const tgtChild = topLevelChildOf(g, e.w, v2);
+          if (srcChild && tgtChild && srcChild !== tgtChild) {
+            const key = `${srcChild}\0${tgtChild}`;
+            if (!proxiedEdges.has(key)) {
+              proxiedEdges.add(key);
+              subgraph.setEdge(srcChild, tgtChild, { ...g.edge(e) });
+            }
+          }
+        });
+        recursiveClusterLayout(subgraph, time2, opts);
+        const subLayoutG = buildLayoutGraph(subgraph);
+        runLayout(subLayoutG, time2, opts);
+        updateInputGraph(subgraph, subLayoutG);
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        subgraph.nodes().forEach((u) => {
+          if (u === v2) return;
+          const n = subgraph.node(u);
+          if (n && typeof n.x === "number" && typeof n.y === "number" && typeof n.width === "number" && typeof n.height === "number") {
+            minX = Math.min(minX, n.x - n.width / 2);
+            maxX = Math.max(maxX, n.x + n.width / 2);
+            minY = Math.min(minY, n.y - n.height / 2);
+            maxY = Math.max(maxY, n.y + n.height / 2);
+          }
+        });
+        if (!isFinite(minX) || !isFinite(minY) || !isFinite(maxX) || !isFinite(maxY)) {
+          minX = minY = 0;
+          maxX = maxY = 0;
+        }
+        const width2 = maxX - minX;
+        const height = maxY - minY;
+        clusterBounds[v2] = {
+          minX,
+          minY,
+          maxX,
+          maxY,
+          width: width2,
+          height,
+          offsetX: minX,
+          offsetY: minY
+        };
+        node._dagreClusterSubgraph = subgraph;
+      }
+    });
+    const isolatedClusters = [];
+    const getAllDescendants = (nodeId) => {
+      const result = [];
+      const queue = (g.children(nodeId) || []).filter((c) => c !== nodeId);
+      while (queue.length > 0) {
+        const curr = queue.shift();
+        result.push(curr);
+        (g.children(curr) || []).filter((c) => c !== curr).forEach((c) => queue.push(c));
+      }
+      return result;
+    };
+    const rawClusterMap = /* @__PURE__ */ new Map();
+    clusterNodes.forEach((v2) => {
+      const node = g.node(v2);
+      if (node && node.rankdir && clusterBounds[v2]) {
+        rawClusterMap.set(v2, (g.children(v2) || []).filter((c) => c !== v2));
+      }
+    });
+    const allDirectChildrenFlat = new Set([...rawClusterMap.values()].flat());
+    const clusterChildrenMap = /* @__PURE__ */ new Map();
+    rawClusterMap.forEach((_2, v2) => {
+      if (!allDirectChildrenFlat.has(v2)) {
+        clusterChildrenMap.set(v2, getAllDescendants(v2));
+      }
+    });
+    const allIsolatedChildren = new Set(
+      [...clusterChildrenMap.values()].flat()
+    );
+    const topLevelNode = (id) => {
+      for (const [cId, ch] of clusterChildrenMap) {
+        if (ch.includes(id)) return cId;
+      }
+      return id;
+    };
+    const allSavedEdges = [];
+    g.edges().forEach((e) => {
+      if (allIsolatedChildren.has(e.v) || allIsolatedChildren.has(e.w)) {
+        allSavedEdges.push({ edge: e, label: g.edge(e) });
+      }
+    });
+    const savedParents = /* @__PURE__ */ new Map();
+    allIsolatedChildren.forEach((id) => {
+      const p2 = g.parent(id);
+      savedParents.set(id, typeof p2 === "string" ? p2 : void 0);
+    });
+    clusterChildrenMap.forEach((children, v2) => {
+      const node = g.node(v2);
+      const removedNodes = [];
+      children.forEach((childId) => {
+        const childNode = g.node(childId);
+        if (!childNode) return;
+        removedNodes.push({ id: childId, node: childNode, parent: savedParents.get(childId) });
+        g.removeNode(childId);
+      });
+      const removedEdges = allSavedEdges.filter(
+        ({ edge }) => children.includes(edge.v) || children.includes(edge.w)
+      );
+      const bounds = clusterBounds[v2];
+      if (!node) return;
+      isolatedClusters.push({
+        clusterId: v2,
+        subgraph: node._dagreClusterSubgraph,
+        bounds,
+        children,
+        removedNodes,
+        removedEdges
+      });
+      node.width = bounds.width;
+      node.height = bounds.height;
+    });
+    const proxyEdgeKeys = /* @__PURE__ */ new Set();
+    allSavedEdges.forEach(({ edge, label }) => {
+      const effV = topLevelNode(edge.v);
+      const effW = topLevelNode(edge.w);
+      if (effV !== effW && g.hasNode(effV) && g.hasNode(effW)) {
+        const key = `${effV}\0${effW}`;
+        if (!proxyEdgeKeys.has(key)) {
+          proxyEdgeKeys.add(key);
+          g.setEdge(effV, effW, { ...label, width: 0, height: 0 });
+        }
+      }
+    });
+    const layoutG = buildLayoutGraph(g);
+    runLayout(layoutG, time2, opts);
+    updateInputGraph(g, layoutG);
+    proxyEdgeKeys.forEach((key) => {
+      const sep2 = key.indexOf("\0");
+      const effV = key.slice(0, sep2);
+      const effW = key.slice(sep2 + 1);
+      if (g.hasEdge(effV, effW)) g.removeEdge(effV, effW);
+    });
+    isolatedClusters.forEach(({ clusterId, subgraph, bounds, removedNodes, removedEdges }) => {
+      var _a, _b;
+      const clusterNode = g.node(clusterId);
+      const clusterX = (_a = clusterNode == null ? void 0 : clusterNode.x) != null ? _a : 0;
+      const clusterY = (_b = clusterNode == null ? void 0 : clusterNode.y) != null ? _b : 0;
+      const subgraphCenterX = (bounds.minX + bounds.maxX) / 2;
+      const subgraphCenterY = (bounds.minY + bounds.maxY) / 2;
+      removedNodes.forEach(({ id, node, parent }) => {
+        g.setNode(id, node);
+        if (parent !== void 0) g.setParent(id, parent);
+      });
+      removedEdges.forEach(({ edge, label }) => {
+        g.setEdge(edge, label);
+      });
+      subgraph.nodes().forEach((u) => {
+        if (u === clusterId) return;
+        const subNode = subgraph.node(u);
+        const mainNode = g.node(u);
+        if (mainNode && subNode && typeof subNode.x === "number" && typeof subNode.y === "number") {
+          mainNode.x = clusterX + (subNode.x - subgraphCenterX);
+          mainNode.y = clusterY + (subNode.y - subgraphCenterY);
+        }
+      });
+      delete clusterNode._dagreClusterSubgraph;
+    });
+    clusterNodes.forEach((v2) => {
+      var _a, _b;
+      const node = g.node(v2);
+      const bounds = clusterBounds[v2];
+      if (node && node.rankdir && node._dagreClusterSubgraph && bounds) {
+        const subgraph = node._dagreClusterSubgraph;
+        const parentX = (_a = node.x) != null ? _a : 0;
+        const parentY = (_b = node.y) != null ? _b : 0;
+        const subgraphCenterX = (bounds.minX + bounds.maxX) / 2;
+        const subgraphCenterY = (bounds.minY + bounds.maxY) / 2;
+        subgraph.nodes().forEach((u) => {
+          if (u === v2) return;
+          const subNode = subgraph.node(u);
+          const mainNode = g.node(u);
+          if (mainNode && subNode && typeof subNode.x === "number" && typeof subNode.y === "number") {
+            const dx = subNode.x - subgraphCenterX;
+            const dy = subNode.y - subgraphCenterY;
+            mainNode.x = parentX + dx;
+            mainNode.y = parentY + dy;
+          }
+        });
+        delete node._dagreClusterSubgraph;
+      }
     });
   }
   function runLayout(g, time2, opts) {
+    if ((opts == null ? void 0 : opts.useDynamic) === false) {
+      _oldGraph = null;
+      _rawOldNodes = null;
+    }
     time2("    makeSpaceForEdgeLabels", () => makeSpaceForEdgeLabels(g));
     time2("    removeSelfEdges", () => removeSelfEdges(g));
-    time2("    acyclic", () => run(g));
+    time2("    acyclic", () => run(g, _oldGraph));
     time2("    nestingGraph.run", () => run3(g));
     time2("    rank", () => rank_default(asNonCompoundGraph(g)));
     time2("    injectEdgeLabelProxies", () => injectEdgeLabelProxies(g));
@@ -2386,11 +2775,12 @@ var dagre = (() => {
     time2("    normalize.run", () => run2(g));
     time2("    parentDummyChains", () => parent_dummy_chains_default(g));
     time2("    addBorderSegments", () => add_border_segments_default(g));
-    time2("    order", () => order(g, opts));
+    time2("    order", () => order(g, opts, _rawOldNodes));
     time2("    insertSelfEdges", () => insertSelfEdges(g));
     time2("    adjustCoordinateSystem", () => adjust(g));
-    time2("    position", () => position(g));
+    time2("    position", () => position(g, opts.corePath));
     time2("    positionSelfEdges", () => positionSelfEdges(g));
+    _rawOldNodes = JSON.parse(JSON.stringify(g._nodes));
     time2("    removeBorderNodes", () => removeBorderNodes(g));
     time2("    normalize.undo", () => undo2(g));
     time2("    fixupEdgeLabelCoords", () => fixupEdgeLabelCoords(g));
@@ -2399,6 +2789,7 @@ var dagre = (() => {
     time2("    assignNodeIntersects", () => assignNodeIntersects(g));
     time2("    reversePoints", () => reversePointsForReversedEdges(g));
     time2("    acyclic.undo", () => undo(g));
+    _oldGraph = g;
   }
   function updateInputGraph(inputGraph, layoutGraph) {
     inputGraph.nodes().forEach((v2) => {
@@ -2480,9 +2871,10 @@ var dagre = (() => {
     const graph = g.graph();
     graph.ranksep /= 2;
     g.edges().forEach((e) => {
+      var _a;
       const edge = g.edge(e);
       edge.minlen *= 2;
-      if (edge.labelpos.toLowerCase() !== "c") {
+      if (((_a = edge.labelpos) != null ? _a : "r").toLowerCase() !== "c") {
         if (graph.rankdir === "TB" || graph.rankdir === "BT") {
           edge.width += edge.labeloffset;
         } else {
@@ -2574,6 +2966,7 @@ var dagre = (() => {
   }
   function assignNodeIntersects(g) {
     g.edges().forEach((e) => {
+      if (e.v === e.w) return;
       const edge = g.edge(e);
       const nodeV = g.node(e.v);
       const nodeW = g.node(e.w);
@@ -2654,6 +3047,7 @@ var dagre = (() => {
       let orderShift = 0;
       layer.forEach((v2, i) => {
         const node = g.node(v2);
+        if (typeof node.rank !== "number") node.rank = 0;
         node.order = i + orderShift;
         (node.selfEdges || []).forEach((selfEdge) => {
           addDummyNode(g, "selfedge", {
@@ -2662,8 +3056,19 @@ var dagre = (() => {
             rank: node.rank,
             order: i + ++orderShift,
             e: selfEdge.e,
-            label: selfEdge.label
+            edgeLabel: selfEdge.label
           }, "_se");
+          if (!Array.isArray(selfEdge.label.points) || selfEdge.label.points.length !== 7) {
+            selfEdge.label.points = [
+              { x: 0, y: -10 },
+              { x: 0, y: -10 },
+              { x: 0, y: 0 },
+              { x: 0, y: 10 },
+              { x: 0, y: 10 },
+              { x: 0, y: 0 },
+              { x: 0, y: 0 }
+            ];
+          }
         });
         delete node.selfEdges;
       });
@@ -2672,24 +3077,51 @@ var dagre = (() => {
   function positionSelfEdges(g) {
     g.nodes().forEach((v2) => {
       const node = g.node(v2);
+      const valid = (val) => typeof val === "number" && isFinite(val);
       if (node.dummy === "selfedge") {
         const selfEdgeNode = node;
         const selfNode = g.node(selfEdgeNode.e.v);
-        const x2 = selfNode.x + selfNode.width / 2;
-        const y2 = selfNode.y;
-        const dx = node.x - x2;
-        const dy = selfNode.height / 2;
-        g.setEdge(selfEdgeNode.e, selfEdgeNode.label);
-        g.removeNode(v2);
-        selfEdgeNode.label.points = [
-          { x: x2 + 2 * dx / 3, y: y2 - dy },
-          { x: x2 + 5 * dx / 6, y: y2 - dy },
-          { x: x2 + dx, y: y2 },
-          { x: x2 + 5 * dx / 6, y: y2 + dy },
-          { x: x2 + 2 * dx / 3, y: y2 + dy }
+        const xVal = valid(selfNode == null ? void 0 : selfNode.x) ? selfNode.x : 0;
+        const yVal = valid(selfNode == null ? void 0 : selfNode.y) ? selfNode.y : 0;
+        const widthVal = valid(selfNode == null ? void 0 : selfNode.width) ? selfNode.width : 0;
+        const heightVal = valid(selfNode == null ? void 0 : selfNode.height) ? selfNode.height : 0;
+        const nodeX = valid(node.x) ? node.x : xVal;
+        const nodeY = valid(node.y) ? node.y : yVal;
+        const dx = widthVal / 2;
+        const dy = heightVal / 2;
+        selfEdgeNode.edgeLabel.points = [
+          { x: nodeX + dx, y: nodeY - dy },
+          { x: nodeX + dx, y: nodeY - dy },
+          { x: nodeX, y: nodeY },
+          { x: nodeX - dx, y: nodeY + dy },
+          { x: nodeX - dx, y: nodeY + dy },
+          { x: nodeX, y: nodeY },
+          { x: nodeX, y: nodeY }
         ];
-        selfEdgeNode.label.x = node.x;
-        selfEdgeNode.label.y = node.y;
+        selfEdgeNode.edgeLabel.x = nodeX;
+        selfEdgeNode.edgeLabel.y = nodeY;
+        g.setEdge(selfEdgeNode.e, selfEdgeNode.edgeLabel);
+        g.removeNode(v2);
+      } else if (node && Array.isArray(node.selfEdges)) {
+        node.selfEdges.forEach((selfEdge) => {
+          if (!Array.isArray(selfEdge.label.points) || selfEdge.label.points.length !== 7) {
+            const xVal = valid(node.x) ? node.x : 0;
+            const yVal = valid(node.y) ? node.y : 0;
+            const widthVal = valid(node.width) ? node.width : 0;
+            const heightVal = valid(node.height) ? node.height : 0;
+            const dx = widthVal / 2;
+            const dy = heightVal / 2;
+            selfEdge.label.points = [
+              { x: xVal + dx, y: yVal - dy },
+              { x: xVal + dx, y: yVal - dy },
+              { x: xVal, y: yVal },
+              { x: xVal - dx, y: yVal + dy },
+              { x: xVal - dx, y: yVal + dy },
+              { x: xVal, y: yVal },
+              { x: xVal, y: yVal }
+            ];
+          }
+        });
       }
     });
   }
